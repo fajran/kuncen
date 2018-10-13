@@ -2,13 +2,17 @@ package main
 
 import (
 	"flag"
+	"time"
 
 	"github.com/golang/glog"
-	"k8s.io/apimachinery/pkg/apis/meta/v1"
+	kubeinformers "k8s.io/client-go/informers"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 
-	"github.com/fajran/kuncen/pkg/apis/kuncen/v1alpha1"
 	clientset "github.com/fajran/kuncen/pkg/client/clientset/versioned"
+	informers "github.com/fajran/kuncen/pkg/client/informers/externalversions"
+	"github.com/fajran/kuncen/pkg/controller"
+	"github.com/fajran/kuncen/pkg/signals"
 )
 
 var (
@@ -24,9 +28,16 @@ func init() {
 func main() {
 	flag.Parse()
 
+	stopCh := signals.SetupSignalHandler()
+
 	cfg, err := clientcmd.BuildConfigFromFlags(masterURL, kubeconfig)
 	if err != nil {
 		glog.Fatalf("Error building kubeconfig: %s", err.Error())
+	}
+
+	kubeClient, err := kubernetes.NewForConfig(cfg)
+	if err != nil {
+		glog.Fatalf("Error building kubernetes clientset: %s", err.Error())
 	}
 
 	client, err := clientset.NewForConfig(cfg)
@@ -34,21 +45,20 @@ func main() {
 		glog.Fatalf("Error building kuncen clientset: %s", err.Error())
 	}
 
-	opts := v1.ListOptions{}
-	watch, err := client.KuncenV1alpha1().EncryptedSecrets("").Watch(opts)
+	kubeInformerFactory := kubeinformers.NewSharedInformerFactory(kubeClient, time.Second*30)
+	informerFactory := informers.NewSharedInformerFactory(client, time.Second*30)
+
+	ctrl := controller.NewController(kubeClient, client,
+		kubeInformerFactory.Core().V1().Secrets(),
+		informerFactory.Kuncen().V1alpha1().EncryptedSecrets())
+
+	go kubeInformerFactory.Start(stopCh)
+	go informerFactory.Start(stopCh)
+
+	glog.Infof("Running the controller..")
+
+	err = ctrl.Run(2, stopCh)
 	if err != nil {
-		glog.Fatalf("Cannot watch resource: %s", err.Error())
+		glog.Fatalf("Error running controller: %s", err.Error())
 	}
-
-	glog.Info("Watching resources")
-	for event := range watch.ResultChan() {
-		obj, ok := event.Object.(*v1alpha1.EncryptedSecret)
-		if !ok {
-			continue
-		}
-
-		glog.Infof("Watch event, type:%s, namespace: %s, name: %s",
-			event.Type, obj.Namespace, obj.Name)
-	}
-
 }
